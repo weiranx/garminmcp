@@ -1,0 +1,13 @@
+{
+  "name": "garmin-mcp-oauth",
+  "version": "1.0.0",
+  "description": "OAuth proxy for Garmin MCP server",
+  "main": "oauth-proxy.js",
+  "scripts": {
+    "start": "node oauth-proxy.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "http-proxy-middleware": "^2.0.6"
+  }
+}
