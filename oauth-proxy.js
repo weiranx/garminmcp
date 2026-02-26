@@ -10,73 +10,64 @@ app.use(express.json())
 const CLIENT_ID = process.env.CLIENT_ID
 const CLIENT_SECRET = process.env.CLIENT_SECRET
 const SUPERGATEWAY_PORT = 8100
-const BASE_URL = process.env.BASE_URL // e.g. https://garmin.weiranxiong.com
+const BASE_URL = process.env.BASE_URL
 
 if (!CLIENT_ID || !CLIENT_SECRET || !BASE_URL) {
   console.error('ERROR: CLIENT_ID, CLIENT_SECRET, and BASE_URL must be set')
   process.exit(1)
 }
 
-// Start supergateway as a child process
-const gateway = spawn('supergateway', [
-  '--stdio',
-  'uvx --python 3.12 --from git+https://github.com/Taxuspt/garmin_mcp garmin-mcp',
-  '--outputTransport', 'streamableHttp',
-  '--port', String(SUPERGATEWAY_PORT)
+// Start mcp-proxy as a child process
+// mcp-proxy wraps stdio MCP servers as HTTP more reliably than supergateway
+const gateway = spawn('mcp-proxy', [
+  '--port', String(SUPERGATEWAY_PORT),
+  '--',
+  'uvx', '--python', '3.12',
+  '--from', 'git+https://github.com/Taxuspt/garmin_mcp',
+  'garmin-mcp'
 ], {
   env: { ...process.env, HOME: '/root' },
-  shell: true
 })
 
-gateway.stdout.on('data', (data) => process.stdout.write(`[supergateway] ${data}`))
-gateway.stderr.on('data', (data) => process.stderr.write(`[supergateway] ${data}`))
+gateway.stdout.on('data', (data) => process.stdout.write(`[mcp-proxy] ${data}`))
+gateway.stderr.on('data', (data) => process.stderr.write(`[mcp-proxy] ${data}`))
 gateway.on('exit', (code) => {
-  console.error(`[supergateway] exited with code ${code}`)
+  console.error(`[mcp-proxy] exited with code ${code}`)
   process.exit(1)
 })
 
 // In-memory stores
-const authCodes = new Map()   // code -> { redirectUri, codeChallenge, expiresAt }
-const tokens = new Map()      // token -> expiresAt
+const authCodes = new Map()
+const tokens = new Map()
 
 // Helper: base64url encode
 const base64url = (buf) => buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
 
-// Helper: verify PKCE code challenge
+// Helper: verify PKCE
 const verifyPKCE = (verifier, challenge) => {
   const hash = crypto.createHash('sha256').update(verifier).digest()
   return base64url(hash) === challenge
 }
 
-// ── OAuth Discovery endpoint ──────────────────────────────────────────────────
+// ── OAuth Discovery ───────────────────────────────────────────────────────────
 app.get('/.well-known/oauth-authorization-server', (req, res) => {
   res.json({
     issuer: BASE_URL,
     authorization_endpoint: `${BASE_URL}/authorize`,
     token_endpoint: `${BASE_URL}/oauth/token`,
     response_types_supported: ['code'],
-    grant_types_supported: ['authorization_code'],
+    grant_types_supported: ['authorization_code', 'client_credentials'],
     code_challenge_methods_supported: ['S256']
   })
 })
 
-// ── Authorization endpoint ────────────────────────────────────────────────────
+// ── Authorization GET ─────────────────────────────────────────────────────────
 app.get('/authorize', (req, res) => {
   const { response_type, client_id, redirect_uri, code_challenge, code_challenge_method, state, scope } = req.query
 
-  if (response_type !== 'code') {
-    return res.status(400).send('Unsupported response_type')
-  }
+  if (response_type !== 'code') return res.status(400).send('Unsupported response_type')
+  if (client_id !== CLIENT_ID) return res.status(401).send('Invalid client_id')
 
-  if (client_id !== CLIENT_ID) {
-    return res.status(401).send('Invalid client_id')
-  }
-
-  if (code_challenge_method && code_challenge_method !== 'S256') {
-    return res.status(400).send('Only S256 code_challenge_method supported')
-  }
-
-  // Show a simple approval page
   res.send(`
     <!DOCTYPE html>
     <html>
@@ -109,7 +100,7 @@ app.get('/authorize', (req, res) => {
   `)
 })
 
-// ── Authorization POST (user clicked approve/deny) ────────────────────────────
+// ── Authorization POST ────────────────────────────────────────────────────────
 app.post('/authorize', (req, res) => {
   const { action, client_id, redirect_uri, code_challenge, code_challenge_method, state } = req.body
 
@@ -120,17 +111,13 @@ app.post('/authorize', (req, res) => {
     return res.redirect(url.toString())
   }
 
-  if (client_id !== CLIENT_ID) {
-    return res.status(401).send('Invalid client_id')
-  }
+  if (client_id !== CLIENT_ID) return res.status(401).send('Invalid client_id')
 
-  // Generate auth code
   const code = base64url(crypto.randomBytes(32))
   authCodes.set(code, {
     redirectUri: redirect_uri,
     codeChallenge: code_challenge,
-    codeChallengeMethod: code_challenge_method,
-    expiresAt: Date.now() + 10 * 60 * 1000 // 10 minutes
+    expiresAt: Date.now() + 10 * 60 * 1000
   })
 
   const url = new URL(redirect_uri)
@@ -143,7 +130,6 @@ app.post('/authorize', (req, res) => {
 app.post('/oauth/token', (req, res) => {
   const { grant_type, code, redirect_uri, client_id, client_secret, code_verifier } = req.body
 
-  // Client credentials flow (fallback)
   if (grant_type === 'client_credentials') {
     if (client_id !== CLIENT_ID || client_secret !== CLIENT_SECRET) {
       return res.status(401).json({ error: 'invalid_client' })
@@ -153,38 +139,28 @@ app.post('/oauth/token', (req, res) => {
     return res.json({ access_token: token, token_type: 'bearer', expires_in: 3600 })
   }
 
-  // Authorization code flow
   if (grant_type === 'authorization_code') {
     if (client_id !== CLIENT_ID) {
       return res.status(401).json({ error: 'invalid_client' })
     }
-
     const stored = authCodes.get(code)
     if (!stored || Date.now() > stored.expiresAt) {
       return res.status(400).json({ error: 'invalid_grant' })
     }
-
     if (stored.redirectUri !== redirect_uri) {
       return res.status(400).json({ error: 'invalid_grant', error_description: 'redirect_uri mismatch' })
     }
-
-    // Verify PKCE if present
     if (stored.codeChallenge && code_verifier) {
       if (!verifyPKCE(code_verifier, stored.codeChallenge)) {
         return res.status(400).json({ error: 'invalid_grant', error_description: 'PKCE verification failed' })
       }
     }
-
     authCodes.delete(code)
-
     const token = base64url(crypto.randomBytes(32))
     tokens.set(token, Date.now() + 3600 * 1000)
-
-    // Clean up expired tokens
     for (const [t, exp] of tokens.entries()) {
       if (Date.now() > exp) tokens.delete(t)
     }
-
     return res.json({ access_token: token, token_type: 'bearer', expires_in: 3600 })
   }
 
@@ -212,11 +188,17 @@ app.get('/health', (req, res) => res.json({ status: 'ok' }))
 // ── Protected MCP proxy ───────────────────────────────────────────────────────
 app.use('/mcp', authenticate, createProxyMiddleware({
   target: `http://localhost:${SUPERGATEWAY_PORT}`,
-  changeOrigin: true
+  changeOrigin: true,
+  on: {
+    error: (err, req, res) => {
+      console.error('[proxy error]', err.message)
+      res.status(502).json({ error: 'upstream error', detail: err.message })
+    }
+  }
 }))
 
 // ── Start ─────────────────────────────────────────────────────────────────────
-const waitForGateway = () => new Promise((resolve) => setTimeout(resolve, 3000))
+const waitForGateway = () => new Promise((resolve) => setTimeout(resolve, 8000))
 
 waitForGateway().then(() => {
   app.listen(8101, () => {
