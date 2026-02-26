@@ -1,0 +1,22 @@
+services:
+  garmin-mcp:
+    build: .
+    container_name: garmin-mcp
+    restart: unless-stopped
+    ports:
+      - "8101:8101"
+    environment:
+      - CLIENT_ID=${CLIENT_ID}
+      - CLIENT_SECRET=${CLIENT_SECRET}
+    volumes:
+      # Persist Garmin OAuth tokens across container restarts
+      - garmin-tokens:/root/.garminconnect
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8101/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  garmin-tokens:
