@@ -8,6 +8,7 @@ services:
     environment:
       - CLIENT_ID=${CLIENT_ID}
       - CLIENT_SECRET=${CLIENT_SECRET}
+      - BASE_URL=${BASE_URL}
     volumes:
       # Persist Garmin OAuth tokens across container restarts
       - garmin-tokens:/root/.garminconnect
