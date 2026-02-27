@@ -3,6 +3,7 @@ const { createProxyMiddleware } = require('http-proxy-middleware')
 const crypto = require('crypto')
 const { spawn } = require('child_process')
 const readline = require('readline')
+const fs = require('fs')
 
 const app = express()
 app.use(express.urlencoded({ extended: true }))
@@ -127,9 +128,29 @@ function sendToGarmin(msg, res, isInternal = false) {
 // Start Garmin process
 startGarmin()
 
-// ── In-memory OAuth stores ────────────────────────────────────────────────────
+// ── OAuth token store (persisted to disk) ─────────────────────────────────────
+const TOKENS_FILE = '/root/.garminconnect/oauth-tokens.json'
+
 const authCodes = new Map()
 const tokens = new Map()
+
+function loadTokens() {
+  try {
+    const data = JSON.parse(fs.readFileSync(TOKENS_FILE, 'utf8'))
+    for (const t of data) tokens.set(t, Infinity)
+    console.log(`[server] Loaded ${data.length} persisted token(s)`)
+  } catch { /* file missing or unreadable — start fresh */ }
+}
+
+function saveTokens() {
+  try {
+    fs.writeFileSync(TOKENS_FILE, JSON.stringify([...tokens.keys()]))
+  } catch (e) {
+    console.error('[server] Failed to persist tokens:', e.message)
+  }
+}
+
+loadTokens()
 
 const base64url = (buf) => buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
 
@@ -205,7 +226,8 @@ app.post('/oauth/token', (req, res) => {
     if (client_id !== CLIENT_ID || client_secret !== CLIENT_SECRET)
       return res.status(401).json({ error: 'invalid_client' })
     const token = base64url(crypto.randomBytes(32))
-    tokens.set(token, Infinity)  // never expires
+    tokens.set(token, Infinity)
+    saveTokens()
     return res.json({ access_token: token, token_type: 'bearer' })
   }
 
@@ -218,7 +240,8 @@ app.post('/oauth/token', (req, res) => {
       return res.status(400).json({ error: 'invalid_grant', error_description: 'PKCE failed' })
     authCodes.delete(code)
     const token = base64url(crypto.randomBytes(32))
-    tokens.set(token, Infinity)  // never expires
+    tokens.set(token, Infinity)
+    saveTokens()
     return res.json({ access_token: token, token_type: 'bearer' })
   }
 
