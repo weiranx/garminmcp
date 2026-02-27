@@ -92,7 +92,7 @@ You can also check propagation from outside your network at https://dnschecker.o
 ### 3. Clone the repo
 
 ```bash
-git clone https://github.com/weiranx/garminmcp.git
+git clone https://github.com/weiranx/garminstravamcp.git
 cd garminmcp
 ```
 
