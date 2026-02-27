@@ -271,12 +271,18 @@ app.post('/authorize', (req, res) => {
 app.post('/oauth/token', (req, res) => {
   const { grant_type, code, redirect_uri, client_id, client_secret, code_verifier } = req.body
 
+  // Token TTL: 30 days. Claude.ai does not refresh tokens automatically, so a
+  // short TTL (e.g. 1 hour) causes the MCP connector to silently stop working
+  // after the token expires mid-session.
+  const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000   // 30 days in ms
+  const TOKEN_TTL_S  = 30 * 24 * 60 * 60           // 30 days in seconds
+
   if (grant_type === 'client_credentials') {
     if (client_id !== CLIENT_ID || client_secret !== CLIENT_SECRET)
       return res.status(401).json({ error: 'invalid_client' })
     const token = base64url(crypto.randomBytes(32))
-    tokens.set(token, Date.now() + 3600000)
-    return res.json({ access_token: token, token_type: 'bearer', expires_in: 3600 })
+    tokens.set(token, Date.now() + TOKEN_TTL_MS)
+    return res.json({ access_token: token, token_type: 'bearer', expires_in: TOKEN_TTL_S })
   }
 
   if (grant_type === 'authorization_code') {
@@ -288,9 +294,9 @@ app.post('/oauth/token', (req, res) => {
       return res.status(400).json({ error: 'invalid_grant', error_description: 'PKCE failed' })
     authCodes.delete(code)
     const token = base64url(crypto.randomBytes(32))
-    tokens.set(token, Date.now() + 3600000)
+    tokens.set(token, Date.now() + TOKEN_TTL_MS)
     for (const [t, exp] of tokens.entries()) if (Date.now() > exp) tokens.delete(t)
-    return res.json({ access_token: token, token_type: 'bearer', expires_in: 3600 })
+    return res.json({ access_token: token, token_type: 'bearer', expires_in: TOKEN_TTL_S })
   }
 
   res.status(400).json({ error: 'unsupported_grant_type' })
